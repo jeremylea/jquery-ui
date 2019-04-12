@@ -1,0 +1,1083 @@
+<!DOCTYPE html
+	 PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	 "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+	<head>
+		<meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1" />
+		<title>jQuery UI Example Page</title>
+		<link type="text/css" rel="stylesheet" href="http://jqueryui.com/themes/base/ui.all.css" />
+		<script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/jquery/1.3.2/jquery.min.js"></script>
+		<script type="text/javascript" src="http://ajax.googleapis.com/ajax/libs/jqueryui/1.7.2/jquery-ui.min.js"></script>
+		<script type="text/javascript">
+
+/*
+ * jQuery UI Multiselect
+ *
+ * Authors:
+ *  Michael Aufreiter (quasipartikel.at)
+ *  Yanick Rochon (yanick.rochon[at]gmail[dot]com)
+ *
+ * Dual licensed under the MIT (MIT-LICENSE.txt)
+ * and GPL (GPL-LICENSE.txt) licenses.
+ *
+ * http://yanickrochon.uuuq.com/multiselect/
+ *
+ *
+ * Depends:
+ *	 ui.core.js
+ *	 ui.draggable.js
+ *  ui.droppable.js
+ *  jquery.blockUI (http://github.com/malsup/blockui/)
+ *  jquery.tmpl (http://andrew.hedges.name/blog/2008/09/03/introducing-jquery-simple-templates
+ *
+ * Optional:
+ *  localization (http://plugins.jquery.com/project/localisation)
+ *
+ * Notes:
+ *  The strings in this plugin use a templating engine to enable localization
+ *  and allow flexibility in the messages. Read the documentation for more details.
+ *
+ * Todo:
+ *  restore selected items on remote searchable multiselect upon page reload (same behavior as local mode)
+ *  add sort (is it worth it??) public function to apply the nodeComparator to all items (when using nodeComparator setter)
+ *  tests and optimizations
+ *    - test getters/setters (including options from the defaults)
+ */
+
+
+(function($) {
+
+$.widget("ui.multiselect", {
+	_busy: false,
+	_init: function() {
+
+		// Merge locale into options, allowing options to extend it.
+		this.options = $.extend({}, $.ui.multiselect.locale, this.options);
+		if (!this.options.animated) {
+			this.options.show = 'show';
+			this.options.hide = 'hide';
+		}
+
+		var self = this, o = this.options, timer;
+
+		this._wrapper = this.element.wrap($('<div />')).parent()
+			.addClass("ui-multiselect ui-helper-clearfix ui-widget")
+			.append($('<div />').addClass("selected")
+				.append($('<div />')
+					.css('border-right','0')
+					.addClass("ui-widget-header ui-corner-tl ui-helper-clearfix")
+				)
+				.append($('<div />')
+					.css('border-top','0')
+					.addClass("ui-widget-content ui-corner-bl ui-helper-clearfix")
+				)
+			)
+			.append($('<div />').addClass("available")
+				.append($('<div />')
+					.css('border-left','0')
+					.addClass("ui-widget-header ui-corner-tr ui-helper-clearfix")
+					.append($('<input type="text" />')
+						.addClass('search ui-state-default ui-corner-all')
+						[o.searchable ? 'show' : 'hide']()
+					)
+				)
+				.append($('<div />')
+					.css('border-top','0')
+					.css('border-left','0')
+					.addClass("ui-widget-content ui-corner-br ui-helper-clearfix")
+				)
+			);
+		if (o.removeAll) {
+			this._wrapper.find('div.selected .ui-widget-header').append(
+				$('<button />')
+					.addClass('remove-all ui-state-default ui-corner-all')
+					.html(o.removeAll)
+					.bind('click.multiselect', function() {
+						self.selectNone();
+						return false;
+					})
+			);
+		}
+		this._wrapper.find('div.selected .ui-widget-header').append(
+			$('<span />').addClass('count')
+		);
+		if (o.addAll) {
+			this._wrapper.find('div.available .ui-widget-header').append(
+				$('<button />')
+					.addClass('add-all ui-state-default ui-corner-all')
+					.html(o.addAll)
+					.bind('click.multiselect', function() {
+						self.selectAll();
+						return false;
+					})
+			);
+		}
+		if (o.busy) {
+			this._wrapper.find('div.available .ui-widget-header').append(
+				$('<span />').addClass('busy')
+					.html(o.busy).hide()
+			);
+		}
+		this.selectedList = $('<ul class="selected" />')
+			.bind('selectstart', function() {
+				return false;
+			})
+			.appendTo($('div.selected .ui-widget-content',this._wrapper));
+		this.availableList = $('<ul class="available" />')
+			.bind('selectstart', function() {
+				return false;
+			})
+			.appendTo($('div.available .ui-widget-content',this._wrapper));
+
+		// set up search
+		this._wrapper.find('.ui-state-default')
+			.bind("mouseenter." + this.widgetName, function() {
+				if (!o.disabled) {
+					$(this).addClass("ui-state-hover");
+				}
+			})
+			.bind("mouseleave." + this.widgetName, function() {
+				if (!o.disabled) {
+					$(this).removeClass("ui-state-hover");
+				}
+			})
+			.bind("focus." + this.widgetName, function() {
+				self._wrapper.find('.ui-state-focus')
+					.removeClass('ui-state-focus');
+				if (!o.disabled) {
+					$(this).addClass("ui-state-focus");
+				}
+			})
+			.bind("blur." + this.widgetName, function() {
+				if (!o.disabled) {
+					$(this).removeClass("ui-state-focus");
+				}
+			})
+			.bind("mousedown." + this.widgetName, function() {
+				if (!o.disabled) {
+					$(this).addClass("ui-state-active");
+				}
+			})
+			.bind("mouseup." + this.widgetName, function() {
+				if (!o.disabled) {
+					$(this).removeClass("ui-state-active");
+				}
+			});
+
+		this._wrapper.find('.search')
+			.bind('keydown.multiselect keypress.multiselect', function(e) {
+				if (timer) {
+					clearTimeout(timer);
+				}
+				switch (e.which) {
+				case 13:   // enter
+					this._searchNow();
+					return false;
+
+				default:
+					timer = setTimeout(function() {
+							self._searchNow();
+						}, Math.max(self.options.searchDelay,1));
+				}
+			});
+
+		// make sure that we're not busy yet
+		this._setBusy(false);
+
+		// set dimensions
+		this._wrapper.width(this.element.width());
+		this._refreshDividerLocation();
+		// fix list height to match <select>
+		this.selectedList.height(Math.max(this.element.height()
+			-this._wrapper.find('div.selected .ui-widget-header').outerHeight(),100));
+		this.availableList.height(this.selectedList.height());
+
+		// init lists
+		// initialize data cache
+		this.availableList.data('multiselect.cache', {});
+		this.selectedList.data('multiselect.cache', {});
+
+		// sortable / droppable	/ draggable
+		var dragOptions = {
+			selected: {
+				sortable: ('both' == o.sortable
+					|| 'left' == o.sortable),
+				droppable: ('both' == o.droppable
+					|| 'left' == o.droppable)
+			},
+			available: {
+				sortable: ('both' == o.sortable
+					|| 'right' == o.sortable),
+				droppable: ('both' == o.droppable
+					|| 'right' == o.droppable)
+			}
+		};
+		this._prepareLists('selected', 'available', dragOptions);
+		this._prepareLists('available', 'selected', dragOptions);
+		this._populateLists(this.element.find('option'));
+	},
+
+	/**************************************
+    *  Public
+    **************************************/
+
+	destroy: function() {
+		this._wrapper.replaceWith(this.element);
+		this.element.removeAttr("role")
+			.unbind("."+this.widgetName);
+
+		$.widget.prototype.destroy.apply(this, arguments);
+	},
+	isSelected: function(item) {
+		if (this.enabled()) {
+			return this._findItem(item, this.selectedList);
+		} else {
+			return null;
+		}
+	},
+	// get all selected values in an array
+	selectedValues: function() {
+		var values = this.selectedList.children('li:visible').map(function(i,item) {
+			return $(item).data('multiselect.optionLink').val();
+		});
+		return Array.prototype.slice.apply(values);
+	},
+	// get/set enable state
+	enabled: function(state) {
+		if (undefined !== state) {
+			if (state) {
+				this.element.removeAttr('disabled');
+			} else {
+				this.element.attr('disabled', true);
+			}
+		}
+		return !this.element.attr('disabled');
+	},
+	selectAll: function() {
+		if (this.enabled()) {
+			this._batchSelect(this.availableList.children('li:visible'), true);
+		}
+	},
+	selectNone: function() {
+		if (this.enabled()) {
+			this._batchSelect(this.selectedList.children('li:visible'), false);
+		}
+	},
+	select: function(item) {
+		if (this.enabled()) {
+			var available = this._findItem(item, this.availableList);
+			if ( available ) {
+				this._setSelected(available, true);
+			}
+		}
+	},
+	deselect: function(item) {
+		if (this.enabled()) {
+			var selected = this._findItem(item, this.selectedList);
+			if (selected) {
+				this._setSelected(selected, false);
+			}
+		}
+	},
+	search: function(query) {
+		if (!this._busy && this.enabled() && this.options.searchable) {
+			var input = this._wrapper.children('input.search');
+			input.val(query);
+			input.trigger('keydown.multiselect');
+		}
+	},
+	// insert new <option> and _populate
+	// @return int   the number of options added
+	addOptions: function(data) {
+		var option, elements = [], key, wasBusy = this._busy;
+		if (data && this.enabled()) {
+			this._setBusy(true);
+			for (key in data) {
+				// check if the option does not exist already
+				option = this.element.find('option[value="'+key+'"]');
+				if (option.length === 0) {
+					option = $('<option value="'+key+'"/>')
+						.text(data[key].value);
+					this.element.append(option);
+					elements.push(option[0]);
+				} else {
+					// Update content
+					option.text(data[key].value);
+				}
+			}
+			if (elements.length > 0) {
+				this._populateLists($(elements));
+			}
+			this._setBusy(wasBusy);
+			return elements.length;
+		} else {
+			return false;
+		}
+	},
+
+	/**************************************
+    *  Private
+    **************************************/
+
+	_setData: function(key, value) {
+		switch (key) {
+			// special treatement must be done for theses values when changed
+			case 'dividerLocation':
+				this.options.dividerLocation = value;
+				this._refreshDividerLocation();
+				break;
+			case 'searchable':
+				this.options.searchable = value;
+				break;
+
+			case 'droppable':
+			case 'sortable':
+				// readonly options
+				alert('The option '+key+' is readonly');
+				break;
+			default:
+				// default behavior
+				this.options[key] = value;
+				break;
+		}
+	},
+
+	_refreshDividerLocation: function() {
+		var d = 100*this.options.dividerLocation, a, s;
+		var b = this._wrapper.find('.add-all').outerWidth(true)+20;
+		do {
+			this._wrapper.find('div.selected').css('width',d+'%');
+			this._wrapper.find('div.available').css('width',(100-d)+'%');
+			a = this._wrapper.find('div.available .ui-widget-header').width();
+			if (a-b > 20) {
+				break;
+			}
+			d--;
+		} while(true);
+		s = this._wrapper.find('.search');
+		b = b + s.outerWidth(true) - s.width();
+		s.width(a-b);
+	},
+	_updateCount: function() {
+		// defer until system is not busy
+		var self = this;
+		if (this._busy) {
+			setTimeout(function() {
+				self._updateCount()
+			}, 100);
+		} else {
+			var count = this.element.children('[selected]').length;
+			var total = this.element.children().length;
+			this._wrapper.find('.count').text(count+'/'+total)
+		}
+	},
+	_prepareLists: function(side, otherSide, opts) {
+		var self = this;
+		var itemSelected = ('selected' == side);
+		var list = this[side+'List'];
+		var otherList = this[otherSide+'List'];
+		var listDragHelper = opts[otherSide].sortable ? _dragHelper : 'clone';
+
+		list
+			.data('multiselect.sortable', opts[side].sortable )
+			.data('multiselect.draggable', !opts[side].sortable && (opts[otherSide].sortable || opts[otherSide].droppable) );
+
+		if (opts[side].sortable) {
+			var _applyReceivedItem = function(item, helper, transfered) {
+				var optionLink = helper.data('multiselect.optionLink') || item.data('multiselect.optionLink');
+				if (transfered && optionLink) {
+					if (itemSelected) {
+						optionLink.attr('selected','selected');
+					} else {
+						optionLink.removeAttr('selected');
+					}
+
+					var cachedItem = otherList.data('multiselect.cache')[optionLink.val()];
+					if (cachedItem) {
+						// if the other list is sortable, the item was permanently moved here, cleanup
+						if (opts[otherSide].sortable) {
+							delete otherList.data('multiselect.cache')[optionLink.val()];
+						} else if (itemSelected) {
+							cachedItem.addClass('shadowed').hide();
+						} else if ('available' == side) {
+							cachedItem.hide();
+						}
+					}
+					// refresh linked options
+					item.data('multiselect.optionLink', optionLink);
+
+					list.data('multiselect.cache')[optionLink.val()] = item;
+					self._applyItemState(item, itemSelected);
+					// pulse
+					//item.effect("pulsate", { times: 1, mode: 'show' }, 400);  // pulsate twice???
+					item.fadeTo('fast', 0.3, function() {
+						$(this).fadeTo('fast', 1, function() {
+							if (!itemSelected) self._filter(item);
+						});
+					});
+				}
+
+				if (transfered) {
+					self._updateCount();
+				}
+				if (itemSelected) {
+					setTimeout(function() {
+						var optionLink = item.data('multiselect.optionLink');
+						if (optionLink) {
+							var prevItem = item.prev('li:not(.ui-sortable-placeholder):visible');
+							var prevOptionLink = prevItem.data('multiselect.optionLink');
+
+							if (prevOptionLink) {
+								optionLink.insertAfter(prevOptionLink);
+							} else {
+								optionLink.prependTo(optionLink.parent());
+							}
+						}
+					}, 100);
+				}
+			};
+
+			list.sortable({
+				appendTo: this._wrapper,
+				connectWith: otherList,
+				containment: this._wrapper,
+				helper: listDragHelper,
+				items: 'li',
+				revert: true,
+				beforeStop: function(event, ui) {
+					// transfer is true if the other list is NOT sortable
+					_applyReceivedItem(ui.item, ui.helper, !opts[otherSide].sortable);
+				},
+				receive: function(event, ui) {
+					// transfer is true if the other list is sortable
+					_applyReceivedItem(ui.item, ui.item, opts[otherSide].sortable);
+				}
+			});
+		} else if (opts[side].droppable) {
+			list.droppable({
+				accept: '.ui-multiselect ul.'+otherSide+' li',
+				hoverClass: 'ui-state-highlight',
+				revert: true,
+				drop: function(event, ui) {
+					if (opts[otherSide].sortable) {
+						// hide helper so we won't see it revert
+						ui.helper.hide();
+						setTimeout(function() {
+							// fix the sortable by removing the element that has been dragged from it
+							// since it is cached, we can retrieve it later on anyway 
+							ui.draggable.remove();
+							otherList.sortable('refreshPositions');
+						}, 10);
+					}
+					self._setSelected(ui.draggable, itemSelected);
+				}
+			});
+		}
+	},
+	_populateLists: function(options) {
+		this._setBusy(true);
+
+		var self = this;
+		// do this async so the browser actually display the waiting message
+		setTimeout(function() {
+			$(options.each(function(i) {
+				var list = (this.selected ? self.selectedList : self.availableList);
+				var item = self._getOptionNode(this).show();
+				self._applyItemState(item, this.selected);
+				item.data('multiselect.idx', i);
+
+				// cache
+				list.data('multiselect.cache')[item.data('multiselect.optionLink').val()] = item;
+
+				self._insertToList(item, list);
+		    }));
+
+			// update count
+			self._setBusy(false);
+			self._updateCount();
+		}, 1);
+	},
+	_insertToList: function(node, list) {
+		var self = this;
+		this._setBusy(true);
+		// the browsers don't like batch node insertion...
+		var _addNodeRetry = 0;
+		var _addNode = function() {
+			var succ = (self.options.nodeComparator ? self._getSuccessorNode(node, list) : null);
+			try {
+				if (succ) {
+					node.insertBefore(succ);
+				} else {
+					list.append(node);
+				}
+				// callback after node insertion
+				if ('function' == typeof self.options.nodeInserted) self.options.nodeInserted(node);
+				self._setBusy(false);
+			} catch (e) {
+				// if this problem did not occur too many times already
+				if ( _addNodeRetry++ < 10 ) {
+					// try again later (let the browser cool down first)
+					setTimeout(function() { _addNode(); }, 1);
+				} else {
+					alert(tmpl(this.options.errorInsertNode, {key:node.data('multiselect.optionLink').val(), value:node.text()}));
+					self._setBusy(false);
+				}
+			}
+		};
+		_addNode();
+	},
+	_getOptionNode: function(option) {
+		option = $(option);
+		var node = $('<li class="ui-state-default">'+option.text()+'<span class="ui-icon"/></li>').hide();
+		node.data('multiselect.optionLink', option);
+		return node;
+	},
+	// used by select and deselect
+	// TODO should the items be matched by their text (visible content) or key value?
+	_findItem: function(item, list) {
+		var found = null;
+		if (parseInt(item) == item) {
+			found = list.children('li:visible:eq('+item+')');
+		} else {
+			list.children('li:visible').each(function(i,el) {
+				el = $(el);
+				if (el.data('multiselect.optionLink').val().toLowerCase() === item.toLowerCase()) {
+					found = el;
+				}
+			});
+		}
+		if ( (null !== found) && (1 === found.length) ) {
+			return found;
+		} else {
+			return false;
+		}
+	},
+	// clones an item with
+	// didn't find a smarter away around this (michael)
+	// now using cache to speed up the process (yr)
+	_cloneWithData: function(clonee, cacheName) {
+		var self = this;
+		var id = clonee.data('multiselect.optionLink').val();
+		var selected = ('selected' == cacheName);
+		var list = (selected ? this.selectedList : this.availableList);
+		var clone = list.data('multiselect.cache')[id];
+
+		if (!clone) {
+			clone = clonee.clone().hide();
+			this._applyItemState(clone, selected);
+			// update cache
+			list.data('multiselect.cache')[id] = clone;
+			// update <option> and idx
+			clone.data('multiselect.optionLink', clonee.data('multiselect.optionLink'));
+			// need this here because idx is needed in _getSuccessorNode
+			clone.data('multiselect.idx', clonee.data('multiselect.idx'));
+			this._insertToList(clone, list);
+		} else {
+			// update idx
+			clone.data('multiselect.idx', clonee.data('multiselect.idx'));
+		}
+		return clone;
+	},
+	_batchSelect: function(elements, state) {
+		var wasBusy = this._busy;
+		this._setBusy(true);
+
+		var self = this;
+		// do this async so the browser actually display the waiting message
+		setTimeout(function() {
+			var _backup = {
+				animated: self.options.animated,
+				hide: self.options.hide,
+				show: self.options.show
+			};
+
+			self.options.animated = null;
+			self.options.hide = 'hide';
+			self.options.show = 'show';
+
+			elements.each(function(i,element) {
+				self._setSelected($(element), state);
+			});
+
+			// filter available items
+			if (!state) self._filter(self.availableList.find('li'));
+
+			// restore
+			$.extend(self.options, _backup);
+
+			self._setBusy(wasBusy);
+			self._updateCount();
+		}, 10);
+	},
+	// find the best successor the given item in the specified list
+	// TODO implement a faster sorting algorithm (and remove the idx dependancy)
+	_getSuccessorNode: function(item, list) {
+		// look for successor based on initial option index
+		var items = list.find('li'), comparator = this.options.nodeComparator;
+		var itemsSize = items.length;
+
+		// no successor, list is null
+		if (items.length == 0) return null;
+
+		var succ, i = Math.min(item.data('multiselect.idx'),itemsSize-1), direction = comparator(item, $(items[i]));
+
+		if ( direction ) {
+			// quick checks
+			if (0>direction && 0>=i) {
+				succ = items[0];
+			} else if (0<direction && itemsSize-1<=i) {
+				i++;
+				succ = null;
+			} else {
+				while (i>=0 && i<items.length) {
+					direction > 0 ? i++ : i--;
+					if (i<0) {
+						succ = item[0]
+					}
+					if ( direction != comparator(item, $(items[i])) ) {
+						// going up, go back one item down, otherwise leave as is
+						succ = items[direction > 0 ? i : i+1];
+						break;
+					}
+				}
+			}
+		} else {
+			succ = items[i];
+		}
+		// update idx
+		item.data('multiselect.idx', i);
+
+		return succ;
+	},
+	_setSelected: function(item, selected) {
+		var self = this, otherItem;
+		if (selected) {
+			item.data('multiselect.optionLink').attr('selected','selected');
+		} else {
+			item.data('multiselect.optionLink').removeAttr('selected');
+		}
+
+		if (selected) {
+			// retrieve associatd or cloned item
+			otherItem = this._cloneWithData(item, 'selected').hide();
+			otherItem[this.options.show](this.options.animated);
+			item.addClass('shadowed')[this.options.hide](this.options.animated, function() { self._updateCount(); });
+		} else {
+			// retrieve associated or clone the item
+			otherItem = this._cloneWithData(item, 'available').hide();
+			item[this.options.hide](this.options.animated, function() { self._updateCount() });
+			otherItem.removeClass('shadowed');
+			if (!otherItem.is('.filtered')) otherItem[this.options.show](this.options.animated);
+		}
+
+		if (!this._busy) {
+			if (this.options.animated) {
+				// pulse
+				//otherItem.effect("pulsate", { times: 1, mode: 'show' }, 400);  // pulsate twice???
+				otherItem.fadeTo('fast', 0.3, function() { $(this).fadeTo('fast', 1); });
+			}
+		}
+
+		return otherItem;
+	},
+	_setBusy: function(state) {
+		var input = this._wrapper.find('input.search');
+		var busy = this._wrapper.find('.busy');
+
+		this._wrapper.find(".remove-all, .add-all")[state ? 'hide' : 'show']();
+		if (state && !this._busy) {
+			// backup input state
+			input.data('multiselect.hadFocus', input.data('multiselect.hasFocus'));
+			// webkit needs to blur before hiding or it won't fire focus again in the else block
+			input.blur().hide();
+			busy.show();
+		} else if(!state && this._busy) {
+			if (this.options.searchable) {
+				input.show();
+			}
+			busy.hide();
+			if (input.data('multiselect.hadFocus')) input.focus();
+		}
+
+		this._busy = state;
+	},
+	_applyItemState: function(item, selected) {
+		var self = this;
+		if (selected) {
+			item.find('.ui-icon').addClass('ui-icon-minus').removeClass('ui-icon-plus');
+			item.unbind('click.multiselect')
+				.bind('click.multiselect', function() {
+					// ignore if busy...
+					if (!self.busy) {
+						self._setSelected($(this), false);
+					}
+					return false;
+				});
+			if (this.selectedList.data('multiselect.draggable')) {
+				// make draggable
+				item.draggable({
+					connectToSortable: that.availableList,
+					helper: _dragHelper,
+					appendTo: self._wrapper,
+					containment: self._wrapper,
+					revert: 'invalid'
+				});
+				// refresh the selected list or the draggable will not connect to it first hand
+				if (this.availableList.data('multiselect.sortable')) {
+					this.availableList.sortable('refresh');
+				}
+			}
+		} else {
+			item.find('.ui-icon').addClass('ui-icon-plus').removeClass('ui-icon-minus');
+			item.unbind('click.multiselect')
+				.bind('click.multiselect', function() {
+					// ignore if busy...
+					if (!self._busy) {
+						self._setSelected($(this), true);
+					}
+					return false;
+				});
+			if (this.availableList.data('multiselect.draggable')) {
+				// make draggable
+				item.draggable({
+					connectToSortable: self.selectedList,
+					helper: _dragHelper,
+					appendTo: self._wrapper,
+					containment: self._wrapper,
+					revert: 'invalid'
+				});
+				// refresh the selected list or the draggable will not connect to it first hand
+				if (this.selectedList.data('multiselect.sortable')) {
+					this.selectedList.sortable('refresh');
+				}
+			}
+		}
+
+		item.unbind('mouseover.multiselect mouseout.multiselect')
+			.bind('mouseover.multiselect', function() {
+				$(this).addClass('ui-state-hover');
+			})
+			.bind('mouseout.multiselect', function() {
+				$(this).removeClass('ui-state-hover');
+			})
+			.removeClass('ui-state-hover')
+
+		return item;
+	},
+	// apply filter and return elements
+	_filter: function(elements) {
+		var term = $.trim(this._wrapper.find('input.search').val())
+			.replace(/[.*+?|()\[\]{}\\]/g, '\\$&');
+		if (!term) {
+			elements.removeClass('filtered');
+		} else {
+			var re = new RegExp(term,'i');
+			elements.each(function() {
+				$(this)[($(this).text().search(re) >= 0 ?
+					'removeClass' : 'addClass')]('filtered');
+			});
+		}
+
+		return elements.not('.filtered, .shadowed').show().end().filter('.filtered, .shadowed').hide().end();
+	},
+	_searchNow: function() {
+		if (this._busy) {
+			return;
+		}
+
+		this._setBusy(true);
+		this._filter(this.availableList.children('li'));
+		this._setBusy(false);
+	}
+});
+// END ui.multiselect
+
+
+/********************************
+ *  Internal functions
+ ********************************/
+
+var _dragHelper = function(event, ui) {
+	var item = $(event.target);
+	var clone = item.clone().width(item.width());
+	clone
+		.data('multiselect.optionLink', item.data('multiselect.optionLink'))
+		.data('multiselect.list', item.parent() )
+		// node ui cleanup
+		.find('.ui-icon').remove()
+	;
+	$('#debug').text('Helper: start drag from list ' + item.parent()[0].className );
+	return clone;
+};
+
+
+/********************************
+ *  Default callbacks
+ ********************************/
+
+var defaultNodeComparator = function(node1,node2) {
+	var text1 = node1.text(),
+	    text2 = node2.text();
+	return text1 == text2 ? 0 : (text1 < text2 ? -1 : 1);
+};
+
+function tmpl(t, v) {
+	return t.replace(/#\{([^{}]*)}/g, function (str,match) {
+		return v[match] !== undefined ? v[match] : str;
+	});
+}
+
+/****************************
+ *  Settings
+ ****************************/
+
+$.extend($.ui.multiselect, {
+	getter: 'selectedValues enabled',
+	defaults: {
+		// sortable and droppable
+		sortable: 'left',
+		droppable: 'both',
+		// searchable
+		searchable: true,
+		searchDelay: 400,
+		// animated
+		animated: 'fast',
+		show: 'slideDown',
+		hide: 'slideUp',
+		// ui
+		dividerLocation: 0.5,
+		// callbacks
+		nodeComparator: defaultNodeComparator,
+		nodeInserted: null
+	},
+	locale: {
+		addAll:'Add all',
+		removeAll:'Remove all',
+		busy:'please wait...',
+		errorInsertNode:"There was a problem trying to add the item:\n\n\t[#{key}] => #{value}\n\nThe operation was aborted."
+	}
+});
+
+})(jQuery);
+
+			// Demo stuff
+			$(function(){
+				// Customize the themeswitcher element...
+				$('#switcher').themeswitcher({onSelect:function(){
+					$().trigger('ui-theme-switch');
+				}});
+
+				$("#countries").multiselect();
+
+			});
+		</script>
+		<style type="text/css">
+
+div.ui-multiselect {
+	font-size: 70%;
+}
+.ui-multiselect div.selected, .ui-multiselect div.available {
+	float: left;
+	overflow: hidden;
+}
+.ui-multiselect * {
+	padding: 0;
+	margin: 0;
+	border: 0;
+}
+.ui-multiselect .ui-widget-header button {
+	float: right;
+	margin: 4px 4px;
+	padding: 2px 4px;
+	font-size: 100%;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.ui-multiselect .ui-widget-header span {
+	float: left;
+	margin: 5px 4px;
+	padding: 2px 4px;
+}
+.ui-multiselect .ui-widget-header input {
+	float: left;
+	margin: 4px 4px;
+	padding: 2px 4px;
+	font-size: 100%;
+}
+
+.ui-multiselect ul {
+	-moz-user-select: none;
+	overflow: auto;
+	overflow-x: hidden;
+	position: relative;
+	list-style: none;
+	width: 100%;
+}
+.ui-multiselect ul.ui-state-highlight {
+	border: 0;
+}
+.ui-multiselect li {
+	cursor: pointer;
+	padding: 2px 4px 2px 16px;
+	white-space: nowrap;
+	position: relative;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	-o-text-overflow: ellipsis;
+	border-top: 0px !important;
+	border-left: 0px !important;
+	border-right: 0px !important;
+	height: 1.2em;
+}
+.ui-multiselect li span.ui-icon {
+	display: block;
+	position: absolute;
+	left: 0px;
+	top: 50%;
+	margin-top: -8px;
+}
+.ui-multiselect li.ui-draggable-dragging {
+	border: 1px solid !important;
+	padding-left: 10px;
+	z-index: 99999;
+}
+
+
+.ui-multiselect .busy {
+	float: left;
+	margin: 4px 4px;
+	padding: 2px 4px 2px 25px;
+	font-size: 100%;
+	z-index: 1;
+	background: none; /*url(images/loading.gif) 4px 50% no-repeat;*/
+}
+
+.ui-multiselect select {
+	position: absolute;
+	left: -99999999px;
+	top: -99999999px;
+}
+
+			/* Demo styles */
+			body {margin: 50px;}
+			form label {display: inline-block; vertical-align: middle; margin: auto 0px auto 0px;}
+			.multiselect {width: 450px;	height: 150px;}
+			#switcher {margin: 20px; float: right;}
+		</style>
+	</head>
+	<body>
+
+	<script type="text/javascript" src="http://jqueryui.com/themeroller/themeswitchertool/"></script>
+	<div id="switcher"></div><br style="clear:both" />
+
+	<form>
+		<select id="countries" class="multiselect" multiple="multiple" name="countries[]">
+			<option value="AFG">Afghanistan</option>
+			<option value="ALB">Albania</option>
+			<option value="DZA">Algeria</option>
+
+			<option value="AND">Andorra</option>
+			<option value="ARG">Argentina</option>
+			<option value="ARM">Armenia</option>
+			<option value="ABW">Aruba</option>
+			<option value="AUS">Australia</option>
+			<option value="AUT" selected="selected">Austria</option>
+
+			<option value="AZE">Azerbaijan</option>
+			<option value="BGD">Bangladesh</option>
+			<option value="BLR">Belarus</option>
+			<option value="BEL">Belgium</option>
+			<option value="BIH">Bosnia and Herzegovina</option>
+			<option value="BRA">Brazil</option>
+			<option value="BRN">Brunei</option>
+			<option value="BGR">Bulgaria</option>
+			<option value="CAN">Canada</option>
+
+			<option value="CHN">China</option>
+			<option value="COL">Colombia</option>
+			<option value="HRV">Croatia</option>
+			<option value="CYP">Cyprus</option>
+			<option value="CZE">Czech Republic</option>
+			<option value="DNK">Denmark</option>
+			<option value="EGY">Egypt</option>
+			<option value="EST">Estonia</option>
+			<option value="FIN">Finland</option>
+
+			<option value="FRA">France</option>
+			<option value="GEO">Georgia</option>
+			<option value="DEU" selected="selected">Germany</option>
+			<option value="GRC">Greece</option>
+			<option value="HKG">Hong Kong</option>
+			<option value="HUN">Hungary</option>
+			<option value="ISL">Iceland</option>
+			<option value="IND">India</option>
+			<option value="IDN">Indonesia</option>
+
+			<option value="IRN">Iran</option>
+			<option value="IRL">Ireland</option>
+			<option value="ISR">Israel</option>
+			<option value="ITA">Italy</option>
+			<option value="JPN">Japan</option>
+			<option value="JOR">Jordan</option>
+			<option value="KAZ">Kazakhstan</option>
+			<option value="KWT">Kuwait</option>
+			<option value="KGZ">Kyrgyzstan</option>
+
+			<option value="LVA">Latvia</option>
+			<option value="LBN">Lebanon</option>
+			<option value="LIE">Liechtenstein</option>
+			<option value="LTU">Lithuania</option>
+			<option value="LUX">Luxembourg</option>
+			<option value="MAC">Macau</option>
+			<option value="MKD">Macedonia</option>
+			<option value="MYS">Malaysia</option>
+			<option value="MLT">Malta</option>
+
+			<option value="MEX">Mexico</option>
+			<option value="MDA">Moldova</option>
+			<option value="MNG">Mongolia</option>
+			<option value="NLD" selected="selected">Netherlands</option>
+			<option value="NZL">New Zealand</option>
+			<option value="NGA">Nigeria</option>
+			<option value="NOR">Norway</option>
+			<option value="PER">Peru</option>
+			<option value="PHL">Philippines</option>
+
+			<option value="POL">Poland</option>
+			<option value="PRT">Portugal</option>
+			<option value="QAT">Qatar</option>
+			<option value="ROU">Romania</option>
+			<option value="RUS">Russia</option>
+			<option value="SMR">San Marino</option>
+			<option value="SAU">Saudi Arabia</option>
+			<option value="CSG">Serbia and Montenegro</option>
+			<option value="SGP">Singapore</option>
+
+			<option value="SVK">Slovakia</option>
+			<option value="SVN">Slovenia</option>
+			<option value="ZAF">South Africa</option>
+			<option value="KOR">South Korea</option>
+			<option value="ESP">Spain</option>
+			<option value="LKA">Sri Lanka</option>
+			<option value="SWE">Sweden</option>
+			<option value="CHE">Switzerland</option>
+			<option value="SYR">Syria</option>
+
+			<option value="TWN">Taiwan</option>
+			<option value="TJK">Tajikistan</option>
+			<option value="THA">Thailand</option>
+			<option value="TUR">Turkey</option>
+			<option value="TKM">Turkmenistan</option>
+			<option value="UKR">Ukraine</option>
+			<option value="ARE">United Arab Emirates</option>
+			<option value="GBR">United Kingdom</option>
+			<option value="USA" selected="selected">United States</option>
+
+			<option value="UZB">Uzbekistan</option>
+			<option value="VAT">Vatican City</option>
+			<option value="VNM">Vietnam</option>
+		</select>
+	</form>
+
+	</body>
+</html>
